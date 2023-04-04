@@ -24,6 +24,15 @@ export default class PubSubApiClient {
      */
     constructor(logger?: Logger);
     /**
+     * gRPC client
+     * @type {Object}
+     */
+    client: any;
+    logger: Logger;
+    lastReceivedEvent: any;
+    lastReplayId: any;
+    pendingEvents: any;
+    /**
      * Authenticates with Salesforce then, connects to the Pub/Sub API
      * @returns {Promise<void>} Promise that resolves once the connection is established
      */
@@ -72,6 +81,13 @@ export default class PubSubApiClient {
      * Closes the gRPC connection. The client will no longer receive events for any topic.
      */
     close(): void;
+    /**
+     * Retrieves the event schema for a topic from the cache.
+     * If it's not cached, fetches the shema with the gRPC client.
+     * @param {string} topicName name of the topic that we're fetching
+     * @returns {Promise<Schema>} Promise holding parsed event schema
+     */
+    getEventSchema(topicName: string): Promise<Schema>;
     #private;
 }
 export type Schema = {
@@ -87,5 +103,4 @@ export type Logger = {
     info: Function;
     error: Function;
 };
-import { EventEmitter } from "events";
 //# sourceMappingURL=client.d.ts.map

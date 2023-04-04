@@ -46,7 +46,6 @@ __export(client_exports, {
 });
 module.exports = __toCommonJS(client_exports);
 var import_crypto2 = __toESM(require("crypto"), 1);
-var import_events = require("events");
 var import_fs2 = __toESM(require("fs"), 1);
 var import_url = require("url");
 var import_avro_js2 = __toESM(require("avro-js"), 1);
@@ -397,30 +396,125 @@ function base64url(input) {
   return buf.toString("base64url");
 }
 
+// src/subscribe.js
+var import_events = require("events");
+var Subscription = class {
+  /**
+   * PubSubApiClient
+   * @type {Object}
+   */
+  #parent;
+  lastReceivedEvent;
+  lastReplayId;
+  pendingEvents;
+  /**
+   * Builds a new Pub/Sub API client
+   * @param {PubSubApiClient} parent an optional custom logger. The client uses the console if no value is supplied.
+   */
+  constructor(parent) {
+    this.#parent = parent;
+  }
+  async subscribe(subscribeRequest) {
+    try {
+      if (!this.#parent.client) {
+        throw new Error("Pub/Sub API client is not connected.");
+      }
+      const schema = await this.#parent.getEventSchema(
+        subscribeRequest.topicName
+      );
+      const subscription = this.#parent.client.Subscribe();
+      subscription.write(subscribeRequest);
+      this.#parent.logger.info(
+        `Subscribe request sent for ${subscribeRequest.numRequested} events from ${subscribeRequest.topicName}...`
+      );
+      this.pendingEvents = subscribeRequest.numRequested;
+      this.lastReceivedEvent = Date.now();
+      setInterval(() => {
+        const now = Date.now();
+        const diffInSeconds = (now - this.lastReceivedEvent) / 1e3;
+        if (diffInSeconds > 50 && this.pendingEvents == 0) {
+          subscription.write({
+            ...subscribeRequest,
+            replayId: encodeReplayId(this.lastReplayId)
+          });
+          this.pendingEvents = subscribeRequest.numRequested;
+          this.lastReceivedEvent = now;
+          this.#parent.logger.debug(
+            `Resubscribe request sent for ${subscribeRequest.numRequested} events from ${subscribeRequest.topicName} due to inactivity...`
+          );
+        }
+      }, 1e3 * 10);
+      const eventEmitter = new import_events.EventEmitter();
+      subscription.on("data", (data) => {
+        if (data.events) {
+          const latestReplayId = decodeReplayId(data.latestReplayId);
+          this.lastReplayId = latestReplayId;
+          this.lastReceivedEvent = Date.now();
+          this.#parent.logger.info(
+            `Received ${data.events.length} events, latest replay ID: ${latestReplayId}`
+          );
+          data.events.forEach((event) => {
+            const parsedEvent = parseEvent(schema, event);
+            this.#parent.logger.debug(parsedEvent);
+            eventEmitter.emit("data", parsedEvent);
+          });
+          this.pendingEvents -= data.events.length;
+        } else {
+        }
+      });
+      subscription.on("end", () => {
+        this.#parent.logger.info("gRPC stream ended");
+        eventEmitter.emit("end");
+      });
+      subscription.on("error", (error) => {
+        this.#parent.logger.error(
+          `gRPC stream error: ${JSON.stringify(error)}`
+        );
+        eventEmitter.emit("error", error);
+      });
+      subscription.on("status", (status) => {
+        this.#parent.logger.info(
+          `gRPC stream status: ${JSON.stringify(status)}`
+        );
+        eventEmitter.emit("status", status);
+      });
+      return eventEmitter;
+    } catch (error) {
+      throw new Error(
+        `Failed to subscribe to events for topic ${subscribeRequest.topicName}`,
+        { cause: error }
+      );
+    }
+  }
+};
+
 // src/client.js
 var PubSubApiClient = class {
   /**
    * gRPC client
    * @type {Object}
    */
-  #client;
+  client;
   /**
    * Map of schemas indexed by topic name
    * @type {Map<string,Schema>}
    */
   #schemaChache;
-  #logger;
+  logger;
+  lastReceivedEvent;
+  lastReplayId;
+  pendingEvents;
   /**
    * Builds a new Pub/Sub API client
    * @param {Logger} logger an optional custom logger. The client uses the console if no value is supplied.
    */
   constructor(logger = console) {
-    this.#logger = logger;
+    this.logger = logger;
     this.#schemaChache = /* @__PURE__ */ new Map();
     try {
       Configuration.load();
     } catch (error) {
-      this.#logger.error(error);
+      this.logger.error(error);
       throw new Error("Failed to initialize Pub/Sub API client", {
         cause: error
       });
@@ -439,7 +533,7 @@ var PubSubApiClient = class {
     let conMetadata;
     try {
       conMetadata = await SalesforceAuth.authenticate();
-      this.#logger.info(
+      this.logger.info(
         `Connected to Salesforce org ${conMetadata.instanceUrl} as ${conMetadata.username}`
       );
     } catch (error) {
@@ -474,7 +568,7 @@ var PubSubApiClient = class {
     try {
       const rootCert = import_fs2.default.readFileSync(import_certifi.default);
       const protoFilePath = (0, import_url.fileURLToPath)(
-        new URL("./pubsub_api.proto?hash=961def31", "file://" + __filename)
+        new URL("./pubsub_api-961def31.proto?hash=961def31", "file://" + __filename)
       );
       const packageDef = import_proto_loader.default.loadSync(protoFilePath, {});
       const grpcObj = import_grpc_js.default.loadPackageDefinition(packageDef);
@@ -491,11 +585,11 @@ var PubSubApiClient = class {
         import_grpc_js.default.credentials.createSsl(rootCert),
         callCreds
       );
-      this.#client = new sfdcPackage.PubSub(
+      this.client = new sfdcPackage.PubSub(
         Configuration.getPubSubEndpoint(),
         combCreds
       );
-      this.#logger.info(
+      this.logger.info(
         `Connected to Pub/Sub API endpoint ${Configuration.getPubSubEndpoint()}`
       );
     } catch (error) {
@@ -552,56 +646,8 @@ var PubSubApiClient = class {
    * @return {EventEmitter} emitter that allows you to listen to received events and stream lifecycle events
    */
   async #subscribe(subscribeRequest) {
-    try {
-      if (!this.#client) {
-        throw new Error("Pub/Sub API client is not connected.");
-      }
-      const schema = await this.#getEventSchema(
-        subscribeRequest.topicName
-      );
-      const subscription = this.#client.Subscribe();
-      subscription.write(subscribeRequest);
-      this.#logger.info(
-        `Subscribe request sent for ${subscribeRequest.numRequested} events from ${subscribeRequest.topicName}...`
-      );
-      const eventEmitter = new import_events.EventEmitter();
-      subscription.on("data", (data) => {
-        if (data.events) {
-          const latestReplayId = decodeReplayId(data.latestReplayId);
-          this.#logger.info(
-            `Received ${data.events.length} events, latest replay ID: ${latestReplayId}`
-          );
-          data.events.forEach((event) => {
-            const parsedEvent = parseEvent(schema, event);
-            this.#logger.debug(parsedEvent);
-            eventEmitter.emit("data", parsedEvent);
-          });
-        } else {
-        }
-      });
-      subscription.on("end", () => {
-        this.#logger.info("gRPC stream ended");
-        eventEmitter.emit("end");
-      });
-      subscription.on("error", (error) => {
-        this.#logger.error(
-          `gRPC stream error: ${JSON.stringify(error)}`
-        );
-        eventEmitter.emit("error", error);
-      });
-      subscription.on("status", (status) => {
-        this.#logger.info(
-          `gRPC stream status: ${JSON.stringify(status)}`
-        );
-        eventEmitter.emit("status", status);
-      });
-      return eventEmitter;
-    } catch (error) {
-      throw new Error(
-        `Failed to subscribe to events for topic ${subscribeRequest.topicName}`,
-        { cause: error }
-      );
-    }
+    const sub = new Subscription(this);
+    return sub.subscribe(subscribeRequest);
   }
   /**
    * Publishes a payload to a topic using the gRPC client
@@ -612,13 +658,13 @@ var PubSubApiClient = class {
    */
   async publish(topicName, payload, correlationKey) {
     try {
-      if (!this.#client) {
+      if (!this.client) {
         throw new Error("Pub/Sub API client is not connected.");
       }
-      const schema = await this.#getEventSchema(topicName);
+      const schema = await this.getEventSchema(topicName);
       const id = correlationKey ? correlationKey : import_crypto2.default.randomUUID();
       const response = await new Promise((resolve, reject) => {
-        this.#client.Publish(
+        this.client.Publish(
           {
             topicName,
             events: [
@@ -652,8 +698,8 @@ var PubSubApiClient = class {
    * Closes the gRPC connection. The client will no longer receive events for any topic.
    */
   close() {
-    this.#logger.info("closing gRPC stream");
-    this.#client.close();
+    this.logger.info("closing gRPC stream");
+    this.client.close();
   }
   /**
    * Retrieves the event schema for a topic from the cache.
@@ -661,7 +707,7 @@ var PubSubApiClient = class {
    * @param {string} topicName name of the topic that we're fetching
    * @returns {Promise<Schema>} Promise holding parsed event schema
    */
-  async #getEventSchema(topicName) {
+  async getEventSchema(topicName) {
     let schema = this.#schemaChache.get(topicName);
     if (!schema) {
       try {
@@ -683,17 +729,17 @@ var PubSubApiClient = class {
    */
   async #fetchEventSchemaWithClient(topicName) {
     return new Promise((resolve, reject) => {
-      this.#client.GetTopic({ topicName }, (topicError, response) => {
+      this.client.GetTopic({ topicName }, (topicError, response) => {
         if (topicError) {
           reject(topicError);
         } else {
           const { schemaId } = response;
-          this.#client.GetSchema({ schemaId }, (schemaError, res) => {
+          this.client.GetSchema({ schemaId }, (schemaError, res) => {
             if (schemaError) {
               reject(schemaError);
             } else {
               const schemaType = import_avro_js2.default.parse(res.schemaJson);
-              this.#logger.info(
+              this.logger.info(
                 `Topic schema loaded: ${topicName}`
               );
               resolve({
@@ -707,5 +753,3 @@ var PubSubApiClient = class {
     });
   }
 };
-// Annotate the CommonJS export names for ESM import in node:
-0 && (module.exports = {});
