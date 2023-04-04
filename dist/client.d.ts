@@ -69,6 +69,7 @@ export default class PubSubApiClient {
      * @returns {Promise<EventEmitter>} Promise that holds an emitter that allows you to listen to received events and stream lifecycle events
      */
     subscribe(topicName: string, numRequested: number): Promise<EventEmitter>;
+    get subscriptions(): any[];
     /**
      * Publishes a payload to a topic using the gRPC client
      * @param {string} topicName name of the topic that we're subscribing to

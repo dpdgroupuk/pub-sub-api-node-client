@@ -53,6 +53,8 @@ export default class PubSubApiClient {
     lastReplayId;
     pendingEvents;
 
+    #subscriptions;
+
     /**
      * Builds a new Pub/Sub API client
      * @param {Logger} logger an optional custom logger. The client uses the console if no value is supplied.
@@ -60,6 +62,8 @@ export default class PubSubApiClient {
     constructor(logger = console) {
         this.logger = logger;
         this.#schemaChache = new Map();
+        this.#subscriptions = [];
+
         // Check and load config
         try {
             Configuration.load();
@@ -215,7 +219,13 @@ export default class PubSubApiClient {
      */
     async #subscribe(subscribeRequest) {
         const sub = new Subscription(this);
+        this.#subscriptions.push(sub);
+
         return sub.subscribe(subscribeRequest);
+    }
+
+    get subscriptions() {
+        return this.#subscriptions;
     }
 
     /**

@@ -31,6 +31,9 @@ export default class Subscription {
      */
     #parent;
 
+    topicName;
+    #isAlive;
+
     lastReceivedEvent;
     lastReplayId;
     pendingEvents;
@@ -41,10 +44,13 @@ export default class Subscription {
      */
     constructor(parent) {
         this.#parent = parent;
+        this.#isAlive = false;
     }
 
     async subscribe(subscribeRequest) {
         try {
+            this.topicName = subscribeRequest.topicName;
+
             if (!this.#parent.client) {
                 throw new Error('Pub/Sub API client is not connected.');
             }
@@ -58,6 +64,7 @@ export default class Subscription {
                 `Subscribe request sent for ${subscribeRequest.numRequested} events from ${subscribeRequest.topicName}...`
             );
 
+            this.#isAlive = true;
             this.pendingEvents = subscribeRequest.numRequested;
             this.lastReceivedEvent = Date.now();
 
@@ -103,12 +110,14 @@ export default class Subscription {
             });
             subscription.on('end', () => {
                 this.#parent.logger.info('gRPC stream ended');
+                this.#isAlive = false;
                 eventEmitter.emit('end');
             });
             subscription.on('error', (error) => {
                 this.#parent.logger.error(
                     `gRPC stream error: ${JSON.stringify(error)}`
                 );
+                this.#isAlive = false;
                 eventEmitter.emit('error', error);
             });
             subscription.on('status', (status) => {
@@ -119,10 +128,22 @@ export default class Subscription {
             });
             return eventEmitter;
         } catch (error) {
+            this.#isAlive = false;
             throw new Error(
                 `Failed to subscribe to events for topic ${subscribeRequest.topicName}`,
                 { cause: error }
             );
         }
+    }
+
+    /**
+     * Not really closing it...
+     */
+    async close() {
+        this.#isAlive = false;
+    }
+
+    get isAlive() {
+        return this.#isAlive;
     }
 }

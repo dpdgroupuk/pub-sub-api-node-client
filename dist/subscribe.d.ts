@@ -23,10 +23,16 @@ export default class Subscription {
      * @param {PubSubApiClient} parent an optional custom logger. The client uses the console if no value is supplied.
      */
     constructor(parent: PubSubApiClient);
+    topicName: any;
     lastReceivedEvent: any;
     lastReplayId: any;
     pendingEvents: any;
     subscribe(subscribeRequest: any): Promise<EventEmitter>;
+    /**
+     * Not really closing it...
+     */
+    close(): Promise<void>;
+    get isAlive(): boolean;
     #private;
 }
 export type Schema = {

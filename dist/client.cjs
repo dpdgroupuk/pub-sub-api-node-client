@@ -404,6 +404,8 @@ var Subscription = class {
    * @type {Object}
    */
   #parent;
+  topicName;
+  #isAlive;
   lastReceivedEvent;
   lastReplayId;
   pendingEvents;
@@ -413,9 +415,11 @@ var Subscription = class {
    */
   constructor(parent) {
     this.#parent = parent;
+    this.#isAlive = false;
   }
   async subscribe(subscribeRequest) {
     try {
+      this.topicName = subscribeRequest.topicName;
       if (!this.#parent.client) {
         throw new Error("Pub/Sub API client is not connected.");
       }
@@ -427,6 +431,7 @@ var Subscription = class {
       this.#parent.logger.info(
         `Subscribe request sent for ${subscribeRequest.numRequested} events from ${subscribeRequest.topicName}...`
       );
+      this.#isAlive = true;
       this.pendingEvents = subscribeRequest.numRequested;
       this.lastReceivedEvent = Date.now();
       setInterval(() => {
@@ -464,12 +469,14 @@ var Subscription = class {
       });
       subscription.on("end", () => {
         this.#parent.logger.info("gRPC stream ended");
+        this.#isAlive = false;
         eventEmitter.emit("end");
       });
       subscription.on("error", (error) => {
         this.#parent.logger.error(
           `gRPC stream error: ${JSON.stringify(error)}`
         );
+        this.#isAlive = false;
         eventEmitter.emit("error", error);
       });
       subscription.on("status", (status) => {
@@ -480,11 +487,21 @@ var Subscription = class {
       });
       return eventEmitter;
     } catch (error) {
+      this.#isAlive = false;
       throw new Error(
         `Failed to subscribe to events for topic ${subscribeRequest.topicName}`,
         { cause: error }
       );
     }
+  }
+  /**
+   * Not really closing it...
+   */
+  async close() {
+    this.#isAlive = false;
+  }
+  get isAlive() {
+    return this.#isAlive;
   }
 };
 
@@ -504,6 +521,7 @@ var PubSubApiClient = class {
   lastReceivedEvent;
   lastReplayId;
   pendingEvents;
+  #subscriptions;
   /**
    * Builds a new Pub/Sub API client
    * @param {Logger} logger an optional custom logger. The client uses the console if no value is supplied.
@@ -511,6 +529,7 @@ var PubSubApiClient = class {
   constructor(logger = console) {
     this.logger = logger;
     this.#schemaChache = /* @__PURE__ */ new Map();
+    this.#subscriptions = [];
     try {
       Configuration.load();
     } catch (error) {
@@ -647,7 +666,11 @@ var PubSubApiClient = class {
    */
   async #subscribe(subscribeRequest) {
     const sub = new Subscription(this);
+    this.#subscriptions.push(sub);
     return sub.subscribe(subscribeRequest);
+  }
+  get subscriptions() {
+    return this.#subscriptions;
   }
   /**
    * Publishes a payload to a topic using the gRPC client
